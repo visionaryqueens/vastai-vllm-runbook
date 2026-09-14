@@ -1,0 +1,23 @@
+gpu-price-perf.py
+  s_13d044e2700902::t_9d558e4cd9fec5 140-144
+  s_13d044e2700902::t_06cfac8e7ca7c9 41,43-122,145-155
+  s_13d044e2700902::t_98b5fac96b9d06 1-40,42,123-139,156-159
+README.md
+  s_13d044e2700902::t_3e2b01247750bd 56-102,154
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "21f6b9d8a2fceb85f5e210f452b5ac380b361ab4",
+  "prompts": {},
+  "sessions": {
+    "s_13d044e2700902": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f25d470f-023a-4e6f-968f-8468554344eb",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Visionary Queens <297298276+visionaryqueens@users.noreply.github.com>"
+    }
+  }
+}
