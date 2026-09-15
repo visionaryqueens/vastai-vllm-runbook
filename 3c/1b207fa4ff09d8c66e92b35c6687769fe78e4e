@@ -1,0 +1,25 @@
+gpu-price-perf.py
+  s_13d044e2700902::t_53b7985a039610 22-24,67-70,101-102,104,122,147,149
+README.md
+  s_13d044e2700902::t_53b7985a039610 101-102
+  s_13d044e2700902::t_b83431fa9b601c 90,92-100,104-111
+  s_13d044e2700902::t_e6c26bf35128bd 117-139,158-177
+onstart-qwen38-vllm.sh
+  s_13d044e2700902::t_ef0a7892e499b6 12-15,106-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "3c1b207fa4ff09d8c66e92b35c6687769fe78e4e",
+  "prompts": {},
+  "sessions": {
+    "s_13d044e2700902": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f25d470f-023a-4e6f-968f-8468554344eb",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Visionary Queens <297298276+visionaryqueens@users.noreply.github.com>"
+    }
+  }
+}
