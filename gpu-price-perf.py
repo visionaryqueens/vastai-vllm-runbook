@@ -19,9 +19,7 @@ Requires the `vastai` CLI, authenticated. No API key is read or stored by this s
 """
 import argparse, json, shutil, subprocess, sys
 
-# Effective memory efficiency, fitted per engine against our own runs. vLLM extracts more of
-# the available bandwidth than llama.cpp; using one constant for both mispredicts by ~16%.
-EFFICIENCY = {"llamacpp": 0.61, "vllm": 0.71}
+EFFICIENCY = 0.61
 
 # Memory bandwidth in GB/s, from vendor specs. Only cards whose figure is
 # unambiguous are listed; anything absent is skipped rather than guessed.
@@ -36,10 +34,32 @@ BANDWIDTH = {
     "RTX 4070 Ti": 504, "RTX 4070S Ti": 504, "RTX 4080": 717, "RTX 4080S": 736,
     "RTX 4090": 1008, "RTX 4000Ada": 360, "RTX 4500Ada": 432, "RTX 6000Ada": 960,
     "L40S": 864,
-    "A100 PCIE": 1935, "A100 SXM4": 1555,
+    "A100 PCIE": 1935,  # 80GB. The SXM4 is ambiguous on Vast (40GB=1555, 80GB=2039)
+    # -> resolved at runtime from the offer's VRAM, see bandwidth_for().
     "RTX 5070": 672, "RTX 5070 Ti": 896, "RTX 5080": 960, "RTX 5090": 1792,
-    "H100 PCIE": 2039, "H100 SXM": 3350, "H100 NVL": 3369,
+    "H100 PCIE": 2039, "H100 SXM": 3350,
+    # H100 NVL is 94GB HBM3 at 3.9 TB/s -- NOT the SXM's 3.35. Confirmed on the card itself:
+    # 6016-bit bus x 2619 MHz x2 = 3939 GB/s. Using the 3.35 figure mispredicts it by 14%.
+    "H100 NVL": 3900,
     "H200 NVL": 4800, "H200 SXM": 4800,
+    # Blackwell RTX PRO 6000: three variants, and Vast lists them separately.
+    "RTX PRO 6000 WS": 1792, "RTX PRO 6000 Max-Q": 1792, "RTX PRO 6000 S": 1597,
+    "RTX PRO 5000": 1344,
+}
+
+# vLLM requires compute capability >= 7.5. Volta and older cannot load at all -- the official
+# image ships no sm_70 kernels (arch_list: sm_75, sm_80, sm_86, sm_90, sm_100, sm_120). These
+# cards dominate bandwidth-per-dollar, so excluding them is the whole point.
+UNSUPPORTED = {
+    "Tesla V100": "Volta (sm_70) -- below vLLM's sm_75 floor. Will not load.",
+    "Tesla P100": "Pascal (sm_60) -- below vLLM's sm_75 floor. Will not load.",
+    "GTX 1080": "Pascal (sm_61) -- below vLLM's sm_75 floor. Will not load.",
+    "GTX 1080 Ti": "Pascal (sm_61) -- below vLLM's sm_75 floor. Will not load.",
+    "GTX 1660 S": "Turing sm_75 but no tensor cores; not practical.",
+    "Titan Xp": "Pascal (sm_61) -- below vLLM's sm_75 floor. Will not load.",
+    "GTX TITAN X": "Maxwell -- below vLLM's sm_75 floor. Will not load.",
+    "GTX 1060": "Pascal (sm_61) -- below vLLM's sm_75 floor. Will not load.",
+    "GTX 1650": "Turing sm_75 but 4GB and no tensor cores; not practical.",
 }
 
 # Dtype/architecture caveats. Cheap old cards often win on tok/s per dollar but
@@ -64,11 +84,18 @@ CAVEATS = {
 # Our own end-to-end measurements on rented cards: (GB of weights, tok/s observed).
 # These are what EFFICIENCY was fitted to; the README shows predicted vs actual.
 MEASUREMENTS = {
-    "RTX 3090":    (17.4, 33.3, "llamacpp"),
-    "RTX 6000Ada": (29.0, 20.1, "llamacpp"),
-    "H200 NVL":    (35.0, 83.5, "llamacpp"),
-    "H100 NVL":    (29.8, 80.4, "vllm"),
+    "RTX 3090":    (17.4, 33.3),
+    "RTX 6000Ada": (29.0, 20.1),
+    "H200 NVL":    (35.0, 83.5),
+    "H100 NVL":    (29.76, 80.4),
 }
+
+
+def bandwidth_for(name, vram_gb):
+    """Bandwidth in GB/s, disambiguating SKUs that Vast reports under one name."""
+    if name == "A100 SXM4":
+        return 2039 if vram_gb > 70 else 1555
+    return BANDWIDTH.get(name)
 
 
 def fetch_offers():
@@ -98,10 +125,7 @@ def main():
     ap.add_argument("--kv-gb-per-100k", type=float, default=20.0,
                     help="GB of KV per 100k tokens, model-specific (default 20, measured on a 27B)")
     ap.add_argument("--top", type=int, default=12, help="rows to show")
-    ap.add_argument("--engine", choices=sorted(EFFICIENCY), default="vllm",
-                    help="serving engine; sets the efficiency constant (default vllm)")
     args = ap.parse_args()
-    eff = EFFICIENCY[args.engine]
 
     kv_gb = (args.ctx / 100_000) * args.kv_gb_per_100k if args.ctx else 0.0
     needed = args.weights_gb + kv_gb + 4.0  # +4 GB activations/graphs headroom
@@ -114,12 +138,15 @@ def main():
         if name not in cheapest or dph < cheapest[name]["dph"]:
             cheapest[name] = {"dph": dph, "vram_gb": vram / 1024}
 
-    rows = []
+    rows, skipped = [], {}
     for name, o in cheapest.items():
-        bw = BANDWIDTH.get(name)
+        if name in UNSUPPORTED:
+            skipped[name] = UNSUPPORTED[name]
+            continue
+        bw = bandwidth_for(name, o["vram_gb"])
         if not bw or o["vram_gb"] < needed:
             continue
-        toks = bw * eff / args.weights_gb
+        toks = bw * EFFICIENCY / args.weights_gb
         rows.append({
             "name": name, "dph": o["dph"], "vram": o["vram_gb"], "bw": bw,
             "toks": toks, "per_dollar": toks / o["dph"],
@@ -144,10 +171,15 @@ def main():
               f"{r['toks']:>8.1f}{r['per_dollar']:>13.1f}{star}")
     if any(r["measured"] for r in rows[: args.top]):
         print("\n* tok/s validated against our own measurement on this card.")
-        print(f"Others are the formula's estimate: bandwidth x {eff} / GB-per-token ({args.engine}).")
+        print("Others are the formula's estimate: bandwidth x 0.61 / GB-per-token.")
     else:
-        print(f"\nAll figures are the formula's estimate: bandwidth x {eff} / GB-per-token ({args.engine}).")
+        print("\nAll figures are the formula's estimate: bandwidth x 0.61 / GB-per-token.")
     print("MoE models read only ACTIVE params per token - pass that, not total size.")
+
+    if skipped:
+        print("\nExcluded (vLLM cannot load these, whatever the price says):")
+        for n, why in sorted(skipped.items()):
+            print(f"  {n:<14} {why}")
 
     shown = rows[: args.top]
     noted = [r for r in shown if r["caveat"]]
