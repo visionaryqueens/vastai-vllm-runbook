@@ -99,26 +99,26 @@ only reads the experts it routes to.
 
 `tok/s ≈ bandwidth × 0.61 / GB_per_token`, with 0.61 fitted to our own runs:
 
-| Card | Engine | GB of weights | Predicted | Measured | Error |
-|---|---|---|---|---|---|
-| RTX 3090 | llama.cpp | 17.4 (Q4) | 32.8 | **33.3** | −1.5% |
-| RTX 6000 Ada | llama.cpp | 29.0 (Q8) | 20.2 | **20.1** | +0.5% |
-| H200 NVL | llama.cpp | 35.0 (fp8) | 83.7 | **83.5** | +0.2% |
-| H100 NVL | vLLM | 29.76 (fp8) | 79.9 | **80.4** | −0.6% |
+| Card | Engine | Method | GB of weights | Predicted | Measured | Error |
+|---|---|---|---|---|---|---|
+| RTX 3090 | llama.cpp | end-to-end | 17.4 (Q4) | 32.8 | 33.3 | −1.5% |
+| RTX 6000 Ada | llama.cpp | end-to-end | 29.0 (Q8) | 20.2 | 20.1 | +0.5% |
+| H200 NVL | llama.cpp | end-to-end | 35.0 (fp8) | 83.7 | 83.5 | +0.2% |
+| H100 NVL | vLLM | **pure decode** | 29.76 (fp8) | 79.9 | **84.2** | **−5.1%** |
 
-Four cards, three architectures, two engines, one constant, under 2% error.
+**Read that last row as the honest one.** The three llama.cpp rows were measured
+end-to-end — total tokens over wall time — which folds time-to-first-token into the rate and
+therefore *under-reports* decode. The H100 NVL row is the only one measured properly, and
+against it the constant is 5% low, implying a true efficiency nearer **0.64**.
 
-**A warning from getting this wrong ourselves.** The H100 NVL row used to predict 69 tok/s
-against a measured 80.4 — a 14% miss — and the tempting conclusion was that the constant
-must depend on the engine, so we nearly shipped a second one for vLLM. The real cause was a
-bad number in the bandwidth table: the H100 NVL is **94 GB HBM3 at 3.9 TB/s**, not the
-3.35 TB/s of the H100 SXM. The card says so itself — a 6016-bit bus at 2619 MHz is 3939 GB/s.
-With the right bandwidth, one constant fits every row. If this model ever misses badly for
-you, **suspect the bandwidth figure before you add a parameter**; fitting a constant to cover
-a typo is how a model quietly stops meaning anything.
+We are not re-fitting the constant to 0.64 on the strength of one clean measurement, because
+the other three rows would need re-measuring with the same method before any new value means
+anything. Treat this model as accurate to **roughly ±10%**, which is plenty to choose
+hardware and not enough to promise anyone a throughput number. The earlier claim of "under
+2% error across four cards" was an artifact of comparing measurements taken different ways.
 
 Note those are all **without** speculative decoding. With MTP enabled the same H100 NVL
-does 129.6 tok/s, because each decode step emits two tokens instead of one — spec decoding
+does 140.4 tok/s, because each decode step emits two tokens instead of one — spec decoding
 beats the bandwidth bound rather than obeying it. Size hardware with the formula, then
 treat MTP as upside.
 
@@ -141,14 +141,18 @@ and there are only 983 to go around, so speculative decoding can never capture i
 Pass **`--max-num-seqs 512`** and MTP starts. Measured on an H100 NVL, same card, same
 price, same 256K context:
 
-| | decode |
+| | pure decode |
 |---|---|
-| `fp8`, default `max_num_seqs` | 80.4 tok/s |
-| `fp8 + mtp`, `--max-num-seqs 512` | **129.6 tok/s** |
+| `fp8`, default `max_num_seqs` | 84.2 tok/s |
+| `fp8 + mtp`, `--max-num-seqs 512` | **140.4 tok/s** |
 
-**+61%** from one flag. vLLM reports `Mean acceptance length: 2.00` with a 100% draft
-acceptance rate on this model — every decode step emits two tokens. Serving a single user
-never needed 1024 concurrent sequences anyway.
+**+67% from one flag.** vLLM reports `Mean acceptance length: 2.00` with a 100% draft
+acceptance rate on this model, and the stream confirms it end to end: 1500 tokens arrive in
+804 chunks, 1.87 tokens per chunk. Serving a single user never needed 1024 concurrent
+sequences anyway.
+
+Both figures are pure decode measured with `bench-decode.py` — see the note on measurement
+below, because getting this number wrong is easy and we did it twice.
 
 **`--reasoning-parser qwen3` will eat your whole token budget.** Ask for 20 tokens and
 you get `content: null` with `reasoning_tokens: 20` — the model spent every token thinking
@@ -205,6 +209,7 @@ The published port is a fallback, and only with a Bearer key set.
 |---|---|
 | `onstart-qwen38-vllm.sh` | Unattended boot: downloads the model, patches the chat template to allow multiple system messages, detects which tool-parser the build accepts, then launches the cascade. Logs to `/workspace/{STATUS,onstart.log,vllm.log,WINNER}`. |
 | `verify.sh` | Proves the endpoint is real: `/health`, `/v1/models`, a completion with thinking off, and an actual tool call. Exits non-zero if any step fails. |
+| `bench-decode.py` | Measures pure decode throughput: times from first token to last (not wall clock) and reads real token counts from `usage` (not stream chunks). Both mistakes are easy to make and each cost us a wrong number. |
 | `gpu-price-perf.py` | Ranks live Vast offers by decode tok/s per dollar for your model size, with dtype caveats. No API key read or stored. |
 | `create-template.sh` | Publishes the whole thing as a Vast.ai template via the API. Reads your key from `~/.config/vastai/vast_api_key` — never hardcoded. |
 

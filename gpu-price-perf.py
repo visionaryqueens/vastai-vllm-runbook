@@ -81,13 +81,15 @@ CAVEATS = {
     "RTX 3090": "Ampere: bf16 yes, fp8 no.",
 }
 
-# Our own end-to-end measurements on rented cards: (GB of weights, tok/s observed).
-# These are what EFFICIENCY was fitted to; the README shows predicted vs actual.
+# Our own measurements on rented cards: (GB of weights, tok/s observed), all WITHOUT
+# speculative decoding -- MTP breaks the bandwidth bound and would contaminate the constant.
+# Caveat: the three llama.cpp rows are end-to-end, the H100 NVL row is pure decode. They are
+# not strictly comparable; see the README. Treat the model as good to about +/-10%.
 MEASUREMENTS = {
     "RTX 3090":    (17.4, 33.3),
     "RTX 6000Ada": (29.0, 20.1),
     "H200 NVL":    (35.0, 83.5),
-    "H100 NVL":    (29.76, 80.4),
+    "H100 NVL":    (29.76, 84.2),
 }
 
 
