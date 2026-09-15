@@ -9,6 +9,10 @@ MODEL_DIR=/workspace/model
 SERVED_NAME="${SERVED_NAME:-qwen38-uncensored}"
 CTX="${CTX:-262144}"
 GPU_UTIL="${GPU_UTIL:-0.92}"
+# MAX_SEQS: el default de vLLM (1024) excede los Mamba cache blocks disponibles (~983) en esta
+# arquitectura hibrida, y eso hace fallar el arranque con MTP -- no por incompatibilidad, sino por
+# un off-by-41. Con 512 sobra margen para un solo usuario y MTP levanta (medido: +61% de decode).
+MAX_SEQS="${MAX_SEQS:-512}"
 PORT=8000
 
 mkdir -p /workspace
@@ -99,7 +103,8 @@ base_args() {
     --gpu-memory-utilization "$GPU_UTIL" --trust-remote-code \
     --reasoning-parser qwen3 --enable-auto-tool-choice \
     --limit-mm-per-prompt '{"image":4,"video":0}' \
-    ${CHAT_TEMPLATE:+--chat-template "$CHAT_TEMPLATE"} --uvicorn-log-level info
+    ${CHAT_TEMPLATE:+--chat-template "$CHAT_TEMPLATE"} --uvicorn-log-level info \
+    --max-num-seqs "$MAX_SEQS"
 }
 
 # FP8 + MTP (speculative decoding nativo, ~1.6x más rápido)

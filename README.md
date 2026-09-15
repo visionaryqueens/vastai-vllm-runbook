@@ -87,28 +87,56 @@ only reads the experts it routes to.
 
 ## The formula, validated
 
-`tok/s ≈ bandwidth × 0.61 / GB_per_token`. The 0.61 was fitted to our own runs, so
-here is predicted vs actually measured on rented hardware:
+`tok/s ≈ bandwidth × efficiency / GB_per_token`.
 
-| Card | GB of weights | Predicted | Measured | Error |
-|---|---|---|---|---|
-| RTX 3090 | 17.4 (Q4) | 32.8 | **33.3** | +1.5% |
-| RTX 6000 Ada | 29.0 (Q8) | 20.2 | **20.1** | −0.5% |
-| H100 NVL | 29.8 (fp8) | 69.0 | **~70** | +1.4% |
-| H200 NVL | 35.0 (fp8) | 83.6 | **83.5** | −0.1% |
+**The efficiency constant depends on the engine, and that matters more than it sounds.**
+Fitting it against llama.cpp gives ~0.61. We then measured the same formula against vLLM
+and it was off by 16% — vLLM simply extracts more of the available bandwidth, at ~0.71.
+Publishing one constant for both would quietly mispredict every vLLM number on this page.
 
-Four cards, three architectures, under 2% error. It is a back-of-envelope model, not
-a benchmark — but it is good enough to pick hardware before you spend anything.
+| Card | Engine | GB of weights | Predicted | Measured | Error |
+|---|---|---|---|---|---|
+| RTX 3090 | llama.cpp | 17.4 (Q4) | 32.8 | **33.3** | +1.5% |
+| RTX 6000 Ada | llama.cpp | 29.0 (Q8) | 20.2 | **20.1** | −0.5% |
+| H200 NVL | llama.cpp | 35.0 (fp8) | 83.7 | **83.5** | +0.2% |
+| H100 NVL | **vLLM** | 29.8 (fp8) | 80.4 | **80.4** | <0.1% |
+
+Five architectures, two engines, under 2% error once the constant matches the engine.
+It is a back-of-envelope model, not a benchmark — but it is good enough to pick hardware
+before you spend anything.
+
+Note those are all **without** speculative decoding. With MTP enabled the same H100 NVL
+does 129.6 tok/s, because each decode step emits two tokens instead of one — spec decoding
+beats the bandwidth bound rather than obeying it. Size hardware with the formula, then
+treat MTP as upside.
 
 ## What actually breaks
 
 Things I hit on real instances that no doc warned me about:
 
-**MTP (speculative decoding) is not guaranteed to start.** On an H100 NVL the
-`fp8 + mtp` launch died after 70s; plain `fp8` came up in 90s. That's why
-`onstart-qwen38-vllm.sh` boots as a **cascade** — fp8+mtp → fp8 → bf16 → 128K rescue —
-and the first config to answer `/health` wins and holds the container. Losing MTP costs
-you roughly 112 → 70 tok/s. It still serves.
+**MTP dies at startup because of a default that is 41 too high.** For three boots in a
+row the `fp8 + mtp` launch died and the cascade fell through to plain `fp8`. It reads like
+an unsupported-feature problem. It isn't:
+
+```
+ValueError: max_num_seqs (1024) exceeds available Mamba cache blocks (983).
+Each decode sequence requires one Mamba cache block, so CUDA graph capture
+cannot proceed. Please lower max_num_seqs to at most 983.
+```
+
+`1024` is vLLM's default. A hybrid model needs one Mamba cache block per decode sequence
+and there are only 983 to go around, so speculative decoding can never capture its graphs.
+Pass **`--max-num-seqs 512`** and MTP starts. Measured on an H100 NVL, same card, same
+price, same 256K context:
+
+| | decode |
+|---|---|
+| `fp8`, default `max_num_seqs` | 80.4 tok/s |
+| `fp8 + mtp`, `--max-num-seqs 512` | **129.6 tok/s** |
+
+**+61%** from one flag. vLLM reports `Mean acceptance length: 2.00` with a 100% draft
+acceptance rate on this model — every decode step emits two tokens. Serving a single user
+never needed 1024 concurrent sequences anyway.
 
 **`--reasoning-parser qwen3` will eat your whole token budget.** Ask for 20 tokens and
 you get `content: null` with `reasoning_tokens: 20` — the model spent every token thinking
@@ -127,12 +155,26 @@ closed`. Read the real mapping:
 vastai show instances-v1 --raw | jq '.instances[0].ports'
 ```
 
-**Hybrid-attention models don't reuse prompt cache.** Qwen3.5/3.8 (`qwen3_5`) is hybrid —
-only 16 of 64 layers carry KV. Ollama logs `forcing full prompt re-processing`, and vLLM's
-`--enable-prefix-caching` is a documented silent no-op on Mamba-2/GDN hybrids. Every turn
-re-processes the entire context. At 256K that's ~150 s **per message**. So:
-- **Agentic** (many turns): 64–128K is the useful ceiling.
-- **One-shot** (big corpus, few questions): 256K pays off, you eat the prefill once.
+**Prefix caching on hybrids: the advice you'll find is out of date.** Qwen3.5/3.8
+(`qwen3_5`) is hybrid — only 16 of 64 layers carry KV — and for a long time that meant no
+prompt reuse: Ollama logs `forcing full prompt re-processing`, and `--enable-prefix-caching`
+was a silent no-op on Mamba-2/GDN hybrids. At 256K that cost ~150 s *per message*, which is
+why every guide (including an earlier version of this one) tells you to cap context at
+64–128K for agentic work.
+
+**vLLM 0.29 fixed it.** The engine now selects a Mamba cache mode that is compatible with
+prefix caching, and the hit rate is real:
+
+```
+Mamba cache mode is set to 'align' for Qwen3_5ForConditionalGeneration
+when prefix caching is enabled
+...
+Prefix cache hit rate: 95.7% / 95.8% / 96.1%
+```
+
+So long context stopped being something you re-pay every turn, and the 64–128K ceiling no
+longer applies. Check your own logs before believing either version of this advice — grep
+for `Prefix cache hit rate` and let the number decide.
 
 **A stopped instance still bills storage.** `stop` pauses GPU billing and keeps your disk.
 With a few 100 GB instances parked that's $2–3/day quietly accruing. `destroy` when done.

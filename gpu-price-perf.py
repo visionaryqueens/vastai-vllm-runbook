@@ -19,7 +19,9 @@ Requires the `vastai` CLI, authenticated. No API key is read or stored by this s
 """
 import argparse, json, shutil, subprocess, sys
 
-EFFICIENCY = 0.61
+# Effective memory efficiency, fitted per engine against our own runs. vLLM extracts more of
+# the available bandwidth than llama.cpp; using one constant for both mispredicts by ~16%.
+EFFICIENCY = {"llamacpp": 0.61, "vllm": 0.71}
 
 # Memory bandwidth in GB/s, from vendor specs. Only cards whose figure is
 # unambiguous are listed; anything absent is skipped rather than guessed.
@@ -62,10 +64,10 @@ CAVEATS = {
 # Our own end-to-end measurements on rented cards: (GB of weights, tok/s observed).
 # These are what EFFICIENCY was fitted to; the README shows predicted vs actual.
 MEASUREMENTS = {
-    "RTX 3090":    (17.4, 33.3),
-    "RTX 6000Ada": (29.0, 20.1),
-    "H100 NVL":    (29.8, 70.0),
-    "H200 NVL":    (35.0, 83.5),
+    "RTX 3090":    (17.4, 33.3, "llamacpp"),
+    "RTX 6000Ada": (29.0, 20.1, "llamacpp"),
+    "H200 NVL":    (35.0, 83.5, "llamacpp"),
+    "H100 NVL":    (29.8, 80.4, "vllm"),
 }
 
 
@@ -96,7 +98,10 @@ def main():
     ap.add_argument("--kv-gb-per-100k", type=float, default=20.0,
                     help="GB of KV per 100k tokens, model-specific (default 20, measured on a 27B)")
     ap.add_argument("--top", type=int, default=12, help="rows to show")
+    ap.add_argument("--engine", choices=sorted(EFFICIENCY), default="vllm",
+                    help="serving engine; sets the efficiency constant (default vllm)")
     args = ap.parse_args()
+    eff = EFFICIENCY[args.engine]
 
     kv_gb = (args.ctx / 100_000) * args.kv_gb_per_100k if args.ctx else 0.0
     needed = args.weights_gb + kv_gb + 4.0  # +4 GB activations/graphs headroom
@@ -114,7 +119,7 @@ def main():
         bw = BANDWIDTH.get(name)
         if not bw or o["vram_gb"] < needed:
             continue
-        toks = bw * EFFICIENCY / args.weights_gb
+        toks = bw * eff / args.weights_gb
         rows.append({
             "name": name, "dph": o["dph"], "vram": o["vram_gb"], "bw": bw,
             "toks": toks, "per_dollar": toks / o["dph"],
@@ -139,9 +144,9 @@ def main():
               f"{r['toks']:>8.1f}{r['per_dollar']:>13.1f}{star}")
     if any(r["measured"] for r in rows[: args.top]):
         print("\n* tok/s validated against our own measurement on this card.")
-        print("Others are the formula's estimate: bandwidth x 0.61 / GB-per-token.")
+        print(f"Others are the formula's estimate: bandwidth x {eff} / GB-per-token ({args.engine}).")
     else:
-        print("\nAll figures are the formula's estimate: bandwidth x 0.61 / GB-per-token.")
+        print(f"\nAll figures are the formula's estimate: bandwidth x {eff} / GB-per-token ({args.engine}).")
     print("MoE models read only ACTIVE params per token - pass that, not total size.")
 
     shown = rows[: args.top]
